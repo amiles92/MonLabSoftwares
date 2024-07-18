@@ -13,3 +13,4 @@ DarkCountData*
 *.pyc
 *.png
 */*.png
+slowcontrol/IV_Curves/*
