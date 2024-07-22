@@ -6,7 +6,6 @@ Created on Thu Jul 18 16:10:02 2024
 """
 
 import sys
-print(sys.path)
 import argparse
 import pyvisa as visa
 import time
@@ -381,9 +380,10 @@ def main(args, currentLimitStr, currentRangeStr):
     else:
         rampVoltage(vs, targetVoltage)
 
-    with open(directory + fileName + ".npy", "wb") as f:
-        datanp = np.array(data,dtype=np.float64)
-        np.save(f, datanp)
+    if vs.ivCheck:
+        with open(directory + fileName + ".npy", "wb") as f:
+            datanp = np.array(data,dtype=np.float64)
+            np.save(f, datanp)
 
     inputVoltage = float(input("Enter next voltage:\n"))
     while inputVoltage > 0:
