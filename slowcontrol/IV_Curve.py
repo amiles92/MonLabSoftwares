@@ -7,6 +7,7 @@ Created on Thu Jul 18 16:10:02 2024
 
 import sys
 print(sys.path)
+import argparse
 import pyvisa as visa
 import time
 import numpy as np
@@ -18,6 +19,7 @@ class voltageSettings:
     voltageRange = 0
     def __init__(self, resetFlag, threshVoltage, normIncrement, 
                  threshIncrement, numMeasurements, trigDelay):
+        self.ivCheck = True
         self.instrument = initialisePowerSupply(resetFlag, numMeasurements, trigDelay)
         self.threshVoltage = threshVoltage
         self.normIncrement = normIncrement
@@ -25,34 +27,64 @@ class voltageSettings:
         self.numMeasurements = numMeasurements
         self.trigDelay = trigDelay
 
+    def __init__(self, resetFlag, threshVoltage, normIncrement, threshIncrement):
+        self.ivCheck = False
+        self.instrument = initialisePowerSupply(resetFlag, 0, 0)
+        self.threshVoltage = threshVoltage
+        self.normIncrement = normIncrement
+        self.threshIncrement = threshIncrement
+        return
+
 def grabArgs():
-    args = sys.argv
-    numberargs = 9
 
-    usage = ['Use this file to control voltage source while taking IV curve measurements: ',
-            ' ',
-            'python3 RS232_IV_21.py [1] [2] [3] [4] [5] [6] [7] [8]',
-            ' ',
-            ' [1] Reset Connection = 1, else use 0',
-            ' [2] Voltage Level Required (volts .1f)',
-            ' [3] Voltage Increment Before Threshold Voltage (volts .1f)',
-            ' [4] Threshold Voltage (above which voltage ramp is in steps of [5]) (volts .1f)',
-            ' [5] Voltage Increment After Threshold Voltage (volts .1f)',
-            ' [6] File name identifier string e.g. "Current1" for Current1.txt measurement output',
-            ' [7] No. current measurements at each voltage (int)',
-            ' [8] Trigger delay between measurements (seconds .1f)',
-            ' ']
+    usage = 'python3 RS232_IV_21.py [-h] <voltage-level> <voltage-increment> ' + \
+        '<threshold-voltage> <threshold-increment> [-i <file-basename> ' + \
+        '<num-measurements> <trigger-delay>] [-j <jump-voltage>] [--no-reset]'
+
+    parser = argparse.ArgumentParser(prog="VoltageControl_RS232",
+                                        description='Monash slowcontrol system for Keithley 6487 power supply',
+                                        usage=usage,
+                                        formatter_class=argparse.RawTextHelpFormatter)
+
+    parser.add_argument('targetVoltage', type=float, metavar='voltage-level',
+                    help='Voltage Level Required (volts .1f)')
+
+    parser.add_argument('normIncrement', type=float, metavar='voltage-increment',
+                        help='Voltage Increment Before Threshold Voltage (volts .1f)')
+
+    parser.add_argument('threshVoltage', type=float, metavar='threshold-voltage',
+                        help='Threshold Voltage (volts .1f)')
+
+    parser.add_argument('threshIncrement', type=float, metavar='threshold-increment',
+                        help='Voltage Increment After Threshold Voltage (volts .1f)')
+
+    parser.add_argument('--no-reset', dest='reset', action='store_false',
+                            help='Stop reset flag being sent to the hardware. Mostly to be used\n'
+                                '  when the connection was previously severed unexpectedly')
+
+    parser.add_argument('-i', dest='ivSettings', action="extend", nargs=3, type=str, 
+                        metavar=('file-basename', 'num-measurements', 'trigger-delay'),
+                        help='For taking the IV Curve, three arguments are required\n'
+                            '  Base file name for saving data to\n'
+                            '  Number of current measurements at each voltage (int)\n'
+                            '  Trigger delay between measurements (seconds .1f)')
+
+    parser.add_argument('-j', dest='jumpTarget', type=float, metavar='jump-voltage',
+                        help='Set a SAFE voltage to jump to/from (volts .1f)')
+
+
+    if len(sys.argv)==1:
+        parser.print_help()
+        parser.exit()
+
+    args = vars(parser.parse_args())
+
+    if (args['ivSettings'] != None):
+        try:
+            args['ivSettings'] = [args['ivSettings'][0], int(args['ivSettings'][1]), float(args['ivSettings'][2])]
+        except:
+            parser.exit(message="Invalid value for IV Curve settings (str, int, float): %s\n" % ", ".join(args['ivSettings']))
     
-    printUsage = lambda : print('\n'.join(usage))
-
-    if(len(args)!=numberargs): 
-        printUsage()
-        sys.exit()
-    if(len(args)>1):
-        if (args[1]=='-help'):
-            printUsage()
-            sys.exit()
-
     return args
 
 def initialisePowerSupply(resetFlag, numMeasurements, trigDelay):
@@ -65,7 +97,8 @@ def initialisePowerSupply(resetFlag, numMeasurements, trigDelay):
     instrument.baud_rate=9600
     instrument.write_termination = '\n'
     instrument.read_termination = '\n'
-    instrument.timeout=np.max([100*numMeasurements+trigDelay,25])
+    if numMeasurements > 0:
+        instrument.timeout=np.max([100*numMeasurements+trigDelay,25])
     #Setup command character terminations - basically the settings so that the PC and instrument
     #recognise the end of a command - this is instrument dependent unfortunately and not always
     #clear as to what it should be set to.
@@ -115,22 +148,23 @@ def setVoltageRange(vs, targetVoltage):
         return 0
     return 1
 
-def runSetup(vs, targetVoltage, currentRange):
-    vs.instrument.write("FORM:ELEM READ,TIME,VSO")#Read current, timestamp, voltage
-    vs.instrument.write("TRIG:DEL 0.0") #Trigger delay of 0;;; IT'S NOT WORKING!!
-    vs.instrument.write("TRIG:COUN " + str(vs.numMeasurements)) #Trigger count of 25
-    vs.instrument.write("NPLC .01")
-    vs.instrument.write("RANG " + currentRange) #Current range of 2 uA
-    vs.instrument.write("AVER:COUN 100") #100 point averaged filter
-    vs.instrument.write("AVER:TCON REP") #Repeating filter
-    vs.instrument.write("AVER:ON") #Turn filter on
+def runSetup(vs, targetVoltage, currentLimit, currentRange=None):
+    if vs.ivCheck:
+        vs.instrument.write("FORM:ELEM READ,TIME,VSO")#Read current, timestamp, voltage
+        vs.instrument.write("TRIG:DEL 0.0") #Trigger delay of 0;;; IT'S NOT WORKING!!
+        vs.instrument.write("TRIG:COUN " + str(vs.numMeasurements)) #Trigger count of 25
+        vs.instrument.write("NPLC .01")
+        vs.instrument.write("RANG " + currentRange) #Current range of 2 uA
+        vs.instrument.write("AVER:COUN 100") #100 point averaged filter
+        vs.instrument.write("AVER:TCON REP") #Repeating filter
+        vs.instrument.write("AVER:ON") #Turn filter on
     
     # --------------------------------------------------------------------------
     out = setVoltageRange(vs, targetVoltage)
     if out == 0:
         exit()
 
-    vs.instrument.write("SOUR:VOLT:ILIM " + currentRange) #Limit current?
+    vs.instrument.write("SOUR:VOLT:ILIM " + currentLimit)
     vs.instrument.write("SOUR:VOLT:STAT ON") #Turn voltage source on
     return
     # --------------------------------------------------------------------------
@@ -304,40 +338,48 @@ def plotData(data):
 
     return
 
-def main():
-    ############################################################################
-    # Fixed Parameters
+def main(args, currentLimitStr, currentRangeStr):
 
-    currentRangeStr = "2e-3" # 2 mA # Applicable to combined MPPCs
-    # currentRangeStr = "2e-2" # 20 mA # Applicable to LEDs
-    ############################################################################
+    resetFlag = args['reset']
 
-    args = grabArgs()
-    resetFlag = int(args[1])
+    targetVoltage   = args['targetVoltage'] # How high voltage is to be set (V)
+    normIncrement   = args['normIncrement'] # Voltage increment below the threshold
+    threshVoltage   = args['threshVoltage'] # Voltage level after which it will increment in ThreshIncrement volts
+    threshIncrement = args['threshIncrement'] # Voltage increment above the threshold
 
-    targetVoltage = float(args[2])#How high voltage is to be set (V)
-    normIncrement = float(args[3])# 1.0 #voltage increment below the threshold
-    threshVoltage = float(args[4]) #Voltage level after which it will increment in ThreshIncrement volts
-    threshIncrement = float(args[5]) #Voltage increment above the threshold
+    jump = False
+    if args['jumpTarget'] != None:
+        jump = True
+        jumpTarget = args['jumpTarget']
 
-    jumpTarget = 70
+    if args['ivSettings'] != None:
 
-    directory =  "./data/IV_Curves/"
-    fileName = str(args[6])
+        directory =  "./data/IV_Curves/"
+        fileName, numMeasurements, trigDelay = args['ivSettings']
 
-    numMeasurements = int(args[7])
-    trigDelay = float(args[8])
-    vs = voltageSettings(resetFlag, threshVoltage, normIncrement, 
-                         threshIncrement, numMeasurements, trigDelay)
-    rampVoltage(vs, 0, 0)
-    vs.instrument.write("*RST") # reset now that Voltage is definitely 0
-    runSetup(vs, targetVoltage, currentRangeStr)
+        vs = voltageSettings(resetFlag, threshVoltage, normIncrement, 
+                            threshIncrement, numMeasurements, trigDelay)
+    
+    else:
+        vs = voltageSettings(resetFlag, threshVoltage, normIncrement, 
+                            threshIncrement)
 
-    check = input("Jump to %iV? y/[n]: " % jumpTarget)
-    if check.lower() == "y":
+    if not resetFlag: # This is going to be pointless if reset is run
+        rampVoltage(vs, 0, 0)
+        vs.instrument.write("*RST") # reset now that Voltage is definitely 0
+
+    if vs.ivCheck:
+        runSetup(vs, targetVoltage, currentLimitStr)
+    else:   
+        runSetup(vs, targetVoltage, currentLimitStr, currentRangeStr)
+
+    if jump:
         jumpVoltage(vs, jumpTarget)
 
-    data = rampVoltage(vs, targetVoltage, 1)
+    if vs.ivCheck:
+        data = rampVoltage(vs, targetVoltage, 1)
+    else:
+        rampVoltage(vs, targetVoltage)
 
     with open(directory + fileName + ".npy", "wb") as f:
         datanp = np.array(data,dtype=np.float64)
@@ -353,6 +395,7 @@ def main():
                 if targetVoltage > vs.voltageRange:
                     out = setVoltageRange(vs, targetVoltage)
                     if out == 0:
+                        jump = False
                         break
                 rampVoltage(vs, inputVoltage, 0)
 
@@ -360,10 +403,10 @@ def main():
             
         except:
             print("\nUnexpected error occurred, ramping down!")
-            check = "n"
+            jump = False
             break
     try:
-        if check.lower() == "y":
+        if jump:
             rampVoltage(vs, jumpTarget, 0)
             jumpVoltage(vs, 0)
         else:
@@ -389,4 +432,15 @@ def main():
 
     
 if __name__ == "__main__":
-    main()
+
+    ############################################################################
+    # Fixed Parameters
+
+    currentRangeStr = "2e-3" # 2 mA # Applicable to combined MPPCs
+    # currentRangeStr = "2e-2" # 20 mA # Applicable to LEDs
+    currentLimitStr = "2.5e-4"
+    ############################################################################
+
+    args = grabArgs()
+
+    main(args, currentLimitStr, currentRangeStr)
